@@ -5,6 +5,9 @@
 #include <ctime>   // std::time
 #include <cstdlib> // std::rand, std::srand
 
+#include "../include/util/result_csv.hpp"
+#include "../include/util/tool.hpp"
+
 // external libraries
 #include <pcl/io/auto_io.h>
 #include <pcl/point_types.h>
@@ -25,76 +28,31 @@ using namespace std;
 using namespace GenIn;
 using namespace GLOBREG;
 
-void saveResult(string fnameOut, Transform3 result)
+Eigen::Matrix4d optimization(pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS, pcl::PointCloud<pcl::PointXYZ>::Ptr issT, pcl::PointCloud<pcl::FPFHSignature33>::Ptr fpfhT, double rT, double inlTh, Vector3 mCentT, int maxCorr, int testMethod)
 {
-    // create file
-    ofstream myfile;
-    myfile.open(fnameOut);
-    for (size_t i = 0; i < 4; i++)
-    {
-        for (size_t j = 0; j < 4; j++)
-        {
-            myfile << result.x[i + j * 4] << " ";
-        }
-        myfile << endl;
-    }
-    myfile.close();
-}
-
-void optimization(pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS, pcl::PointCloud<pcl::PointXYZ>::Ptr cloudT,
-                  string fnameOut, double inlTh, int maxCorr, int testMethod)
-{
-    if (inlTh <= 0 || maxCorr <= 0)
-    {
-        cout << "inlier threshold or maximum correspondence number must > 0" << endl;
-        return;
-    }
-    if (testMethod < 1 || testMethod > 7)
-    {
-        cout << "wrong testing method, use numbers from 1 to 7 to specify" << endl;
-        return;
-    }
-
     pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> colorS(cloudS, 255, 0, 0);
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> colorT(cloudT, 255, 255, 0);
 
     // voxel grid filter (VGF)
     cout << "performing voxel grid sampling with grid size = " << inlTh << endl;
     VGF(cloudS, cloudS, inlTh);
-    VGF(cloudT, cloudT, inlTh);
-
-    // show point clouds after VGF
-    boost::shared_ptr<pcl::visualization::PCLVisualizer> viewerVGF(new pcl::visualization::PCLVisualizer("After Voxel Grid Downsampling"));
-    viewerVGF->setBackgroundColor(0, 0, 0);
-    viewerVGF->addPointCloud<pcl::PointXYZ>(cloudS, colorS, "source cloud");
-    viewerVGF->addPointCloud<pcl::PointXYZ>(cloudT, colorT, "target cloud");
-    viewerVGF->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 6, "After Voxel Grid Downsampling");
-    viewerVGF->spinOnce();
 
     // extract ISS
     pcl::PointCloud<pcl::PointXYZ>::Ptr issS(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointIndicesPtr issIdxS(new pcl::PointIndices);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr issT(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointIndicesPtr issIdxT(new pcl::PointIndices);
     cout << "extracting ISS keypoints..." << inlTh << endl;
     ISSExt(cloudS, issS, issIdxS, inlTh);
-    ISSExt(cloudT, issT, issIdxT, inlTh);
-    cout << "size of issS = " << issS->size() << "; size of issT = " << issT->size() << endl;
+    cout << "size of issS = " << issS->size() << endl;
 
     // translating the center of both point clouds to the origin
-    Vector3 centS(0, 0, 0), centT(0, 0, 0);
-    double rS, rT;
+    Vector3 centS(0, 0, 0);
+    double rS;
     CentAndRComp(issS, centS, rS);
-    CentAndRComp(issT, centT, rT);
     Vector3 mCentS(-centS.x, -centS.y, -centS.z);
-    Vector3 mCentT(-centT.x, -centT.y, -centT.z);
     transPC(issS, mCentS);
-    transPC(issT, mCentT);
 
     // compute matches if needed
     // compute normal
     pcl::PointCloud<pcl::FPFHSignature33>::Ptr fpfhS(new pcl::PointCloud<pcl::FPFHSignature33>());
-    pcl::PointCloud<pcl::FPFHSignature33>::Ptr fpfhT(new pcl::PointCloud<pcl::FPFHSignature33>());
     vector<corrTab> corr;
     vector<int> corrNOS, corrNOT;
 
@@ -103,7 +61,6 @@ void optimization(pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS, pcl::PointCloud<pc
         // compute fpfh
         cout << "computing fpfh..." << endl;
         FPFHComp(cloudS, inlTh, issIdxS, fpfhS);
-        FPFHComp(cloudT, inlTh, issIdxT, fpfhT);
         // match features
         cout << "matching correspodences..." << endl;
         corrComp(fpfhS, fpfhT, corr, maxCorr, corrNOS, corrNOT);
@@ -113,7 +70,6 @@ void optimization(pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS, pcl::PointCloud<pc
     // start optimization
     Transform3 result;
 
-    auto start = chrono::steady_clock::now();
     if (testMethod == 1)
     {
         cout << "running FMA+BnB..." << endl;
@@ -161,36 +117,10 @@ void optimization(pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS, pcl::PointCloud<pc
             }
         }
     }
-    //! uncomment if you have installed and want to use S4PCS
-    //    else if(testMethod == 7){
-    //        cout<<"running S4PCS..."<<endl;
-    //        pcl::Super4PCS<pcl::PointXYZ, pcl::PointXYZ> s4pcs;
-    //        pcl::PointCloud<pcl::PointXYZ> final;
-    //        s4pcs.setInputSource(issS);
-    //        s4pcs.setInputTarget(issT);
-    //        s4pcs.options_.delta =  inlTh;
-    //        s4pcs.options_.configureOverlap(0.5);
-    //        //register
-    //        s4pcs.align(final);
-    //        Eigen::Matrix<float, 4,4> a = s4pcs.getFinalTransformation();
-    //        for(size_t i=0;i<4;i++){
-    //            for(size_t j=0;j<4;j++){
-    //                result.x[i+j*4] = (double)a(i,j);
-    //            }
-    //        }
-    //    }
-
-    auto end = chrono::steady_clock::now();
-    cout << "runtime in ms = " << chrono::duration_cast<chrono::milliseconds>(end - start).count() << endl;
 
     result = TransMatCompute(result, mCentS, mCentT);
-    cout << "saving result to: " << fnameOut << endl;
-    saveResult(fnameOut, result);
 
-    // after registration
-    // transform point clouds
-
-    Eigen::Matrix4f transform;
+    Eigen::Matrix4d transform;
     for (size_t i = 0; i < 4; i++)
     {
         for (size_t j = 0; j < 4; j++)
@@ -198,23 +128,7 @@ void optimization(pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS, pcl::PointCloud<pc
             transform(i, j) = result.x[i + 4 * j];
         }
     }
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloudSReg(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::transformPointCloud(*cloudS, *cloudSReg, transform);
-
-    boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer2(new pcl::visualization::PCLVisualizer("after registration"));
-    viewer2->setBackgroundColor(0, 0, 0);
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> colorSReg(cloudSReg, 255, 0, 0);
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> colorTReg(cloudT, 255, 255, 0);
-    viewer2->addPointCloud<pcl::PointXYZ>(cloudSReg, colorSReg, "source cloud");
-    viewer2->addPointCloud<pcl::PointXYZ>(cloudT, colorTReg, "target cloud");
-    viewer2->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 6, "after registration");
-
-    while (!viewer2->wasStopped())
-    {
-        viewer2->spinOnce(100);
-        //     boost::this_thread::sleep (boost::posix_time::microseconds (100000));
-    }
+    return transform;
 }
 
 void FPADependenceTest(pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS, pcl::PointCloud<pcl::PointXYZ>::Ptr cloudT,
@@ -320,358 +234,96 @@ void saveFMPDependence(string fname, std::vector<int> outVec)
 
 int main(int argc, char *argv[])
 {
-    if (argc == 4)
+    // INPUT:
+    // 1. path to the source point cloud
+    string source_folder = argv[1];
+    // 2. path to the target point cloud
+    string target_folder = argv[2];
+    // 3. ground truth file
+    string gt_file_path = argv[3];
+    // 4. output result file
+    string output_folder_path = argv[4];
+    // 5. inlier threshold (0.2~0.3)
+    double inlTh = atof(argv[5]);
+    // 6. maximum correspondence number (default 10)
+    int maxCorr = atoi(argv[6]);
+    // 7. method u want to run (from 1 to 6, default 1)
+    //    1. FMP+BnB; 2. BnB; 3. LM; 4. GTA; 5.RANSAC 6. K4PCS; 7. S4PCS
+    int testMethod = atoi(argv[7]);
+
+    if (inlTh <= 0 || maxCorr <= 0)
     {
-        // INPUT:
-        //  1. path to the source point cloud
-        string fnameS = argv[1];
-        // 2. path to the target point cloud
-        string fnameT = argv[2];
-        // 3. output transformation file
-        string fnameOut = argv[3];
-        // 4. inlier threshold (default 0.05)
-        double inlTh = 0.1;
-        // 5. maximum number of correspondences per source point (default 10)
-        int maxCorr = 10;
-        // 6. method u want to run (from 1 to 6, default 1)
-        //    1. FMP+BnB; 2. BnB; 3.RANSAC 4. LM; 5. GTA; 6. K4PCS; 7. S4PCS
-        int testMethod = 1;
+        cout << "inlier threshold or maximum correspondence number must > 0" << endl;
+        return 1;
+    }
+    if (testMethod < 1 || testMethod > 7)
+    {
+        cout << "wrong testing method, use numbers from 1 to 7 to specify" << endl;
+        return 1;
+    }
+
+    // Create output folder with date and create result csv
+    std::string date = create_date();
+    std::string pcd_save_folder_path = output_folder_path + "/" + date;
+    std::filesystem::create_directory(pcd_save_folder_path);
+    ResultCsv result_csv(pcd_save_folder_path, gt_file_path);
+
+    // read pcd files
+    auto src_cloud_files = find_point_cloud_files(source_folder);
+    auto tar_cloud_files = find_point_cloud_files(target_folder);
+
+    // sort src files
+    if (can_convert_to_double(src_cloud_files))
+    {
+        std::sort(src_cloud_files.begin(), src_cloud_files.end(), [](const std::string &a, const std::string &b)
+                  { return std::stod(std::filesystem::path(a).stem().string()) < std::stod(std::filesystem::path(b).stem().string()); });
+    }
+
+    // pre process target cloud
+    const auto cloudT = create_tar_cloud(tar_cloud_files);
+    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> colorT(cloudT, 255, 255, 0);
+    VGF(cloudT, cloudT, inlTh);
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr issT(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointIndicesPtr issIdxT(new pcl::PointIndices);
+    ISSExt(cloudT, issT, issIdxT, inlTh);
+    std::cout << "size of issT = " << issT->size() << std::endl;
+
+    Vector3 centT(0, 0, 0);
+    double rT;
+    CentAndRComp(issT, centT, rT);
+    Vector3 mCentT(-centT.x, -centT.y, -centT.z);
+    transPC(issT, mCentT);
+
+    pcl::PointCloud<pcl::FPFHSignature33>::Ptr fpfhT(new pcl::PointCloud<pcl::FPFHSignature33>());
+    FPFHComp(cloudT, inlTh, issIdxT, fpfhT);
+
+    for (const auto &src_cloud_file : src_cloud_files)
+    {
         // read point clouds
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloudT(new pcl::PointCloud<pcl::PointXYZ>);
-        cout << "reading input point clouds ..." << endl;
-        if (pcl::io::load<pcl::PointXYZ>(fnameS, *cloudS) == -1) //* load the file
+        if (pcl::io::load<pcl::PointXYZ>(src_cloud_file, *cloudS) == -1) //* load the file
         {
-            cout << "Couldn't read file: " << fnameS << endl;
+            cout << "Couldn't read file: " << src_cloud_file << endl;
             return (-1);
         }
-        if (pcl::io::load<pcl::PointXYZ>(fnameT, *cloudT) == -1) //* load the file
-        {
-            cout << "Couldn't read file: " << fnameT << endl;
-            return (-1);
-        }
-        optimization(cloudS, cloudT, fnameOut, inlTh, maxCorr, testMethod);
-    }
-    else if (argc == 6)
-    {
-        // INPUT:
-        //  1. path to the source point cloud
-        string fnameS = argv[1];
-        // 2. path to the target point cloud
-        string fnameT = argv[2];
-        // 3. output transformation file
-        string fnameOut = argv[3];
-        // 4. inlier threshold (default 0.1)
-        double inlTh = atof(argv[4]);
-        // 5. method u want to run (from 1 to 6, default 1)
-        //    1. FMP+BnB; 2. BnB; 3. LM; 4. GTA; 5.RANSAC 6. K4PCS; 7. S4PCS
-        int testMethod = atoi(argv[5]);
+        std::cout << "size of cloudS = " << cloudS->size() << std::endl;
 
-        int maxCorr = 10;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloudT(new pcl::PointCloud<pcl::PointXYZ>);
+        const auto start_time = std::chrono::system_clock::now();
 
-        // read point clouds
-        cout << "reading input point clouds ..." << endl;
-        if (pcl::io::load<pcl::PointXYZ>(fnameS, *cloudS) == -1) //* load the file
-        {
-            cout << "Couldn't read file: " << fnameS << endl;
-            return (-1);
-        }
-        if (pcl::io::load<pcl::PointXYZ>(fnameT, *cloudT) == -1) //* load the file
-        {
-            cout << "Couldn't read file: " << fnameT << endl;
-            return (-1);
-        }
-        optimization(cloudS, cloudT, fnameOut, inlTh, maxCorr, testMethod);
-    }
-    // test for the dependence of FPA to the order of input correspondences
-    else if (argc == 5)
-    {
+        const Eigen::Matrix4d result_T = optimization(cloudS, issT, fpfhT, rT, inlTh, mCentT, maxCorr, testMethod);
 
-        // INPUT:
-        //  1. path to the config file
-        string fpathConfig = argv[1];
-        // 2. inlier threshold (default 0.05)
-        double inlTh = atof(argv[2]);
-        // 3. number of test times
-        int testNO = atoi(argv[3]);
-        // 4. output file folder
-        string fpathOut = argv[4];
+        const auto end_time = std::chrono::system_clock::now();
+        const double elapsed_time_msec = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count() / 1e6;
 
-        // read config file
-        vector<int> vecOut(testNO + 1);
-        vector<pair<int, int>> data;
+        result_csv.write(
+            std::filesystem::path(src_cloud_file).stem().string(),
+            elapsed_time_msec,
+            result_T,
+            Eigen::Matrix4d::Identity());
 
-        int oneNO;
-        string fnameConfig = fpathConfig + "RegConfig_Zhipeng.config";
-        cout << fnameConfig << endl;
-        ifstream myfile(fnameConfig);
-        cout << myfile.is_open() << endl;
-        if (myfile.is_open())
-        {
-            // read number of pairs
-            myfile >> oneNO;
-            cout << oneNO << endl;
-            if (oneNO > 0)
-            {
-                data.resize(oneNO);
-                for (size_t i = 0; i < oneNO; i++)
-                {
-                    myfile >> data[i].first;
-                    myfile >> data[i].second;
-                    cout << "testing data[" << i << "] = (" << data[i].first << ", " << data[i].second << ")" << endl;
-                    string fnameS, fnameT;
-                    if (data[i].first < 10)
-                    {
-                        fnameS = fpathConfig + "s0" + std::to_string(data[i].first) + ".ply";
-                    }
-                    else
-                    {
-                        fnameS = fpathConfig + "s" + std::to_string(data[i].first) + ".ply";
-                    }
-
-                    if (data[i].second < 10)
-                    {
-                        fnameT = fpathConfig + "s0" + std::to_string(data[i].second) + ".ply";
-                    }
-                    else
-                    {
-                        fnameT = fpathConfig + "s" + std::to_string(data[i].second) + ".ply";
-                    }
-
-                    int maxCorr = 10;
-                    pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS(new pcl::PointCloud<pcl::PointXYZ>);
-                    pcl::PointCloud<pcl::PointXYZ>::Ptr cloudT(new pcl::PointCloud<pcl::PointXYZ>);
-
-                    // read point clouds
-                    cout << "reading input point clouds ..." << endl;
-                    if (pcl::io::load<pcl::PointXYZ>(fnameS, *cloudS) == -1) //* load the file
-                    {
-                        cout << "Couldn't read file: " << fnameS << endl;
-                        return (-1);
-                    }
-                    if (pcl::io::load<pcl::PointXYZ>(fnameT, *cloudT) == -1) //* load the file
-                    {
-                        cout << "Couldn't read file: " << fnameT << endl;
-                        return (-1);
-                    }
-
-                    // start the test
-                    FPADependenceTest(cloudS, cloudT, inlTh, maxCorr, testNO, vecOut);
-
-                    // save the result
-                    string fOutName = fpathOut + "s" + std::to_string(data[i].first) + "-s" + std::to_string(data[i].second) + ".txt";
-                    cout << "saving file to: " << fOutName << endl;
-                    saveFMPDependence(fOutName, vecOut);
-                }
-            }
-        }
-
-        myfile.close();
-    }
-    // registering multiple point clouds using FMP+BnB
-    else if (argc == 3)
-    {
-        // Input:
-        // 1. path to the config file which stores the paths to all point clouds that we want to register
-        string fnameC = argv[1];
-        // 2. the inlier threshold
-        double inlTh = atof(argv[2]);
-        int maxCorr = 10;
-        // read config file
-        string line;
-        ifstream myfile(fnameC);
-
-        if (myfile.is_open())
-        {
-            getline(myfile, line);
-            int noPC = stoi(line);
-            pcl::PointCloud<pcl::PointXYZ>::Ptr cloudS(new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::PointCloud<pcl::PointXYZ>::Ptr cloudSReg(new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::PointCloud<pcl::PointXYZ>::Ptr cloudT(new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::PointCloud<pcl::PointXYZ>::Ptr cloudTReg(new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::PointCloud<pcl::PointXYZ>::Ptr issS(new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::PointIndicesPtr issIdxS(new pcl::PointIndices);
-            pcl::PointCloud<pcl::PointXYZ>::Ptr issT(new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::PointIndicesPtr issIdxT(new pcl::PointIndices);
-            pcl::PointCloud<pcl::FPFHSignature33>::Ptr fpfhS(new pcl::PointCloud<pcl::FPFHSignature33>());
-            pcl::PointCloud<pcl::FPFHSignature33>::Ptr fpfhT(new pcl::PointCloud<pcl::FPFHSignature33>());
-            vector<corrTab> corr;
-            vector<int> corrNOS, corrNOT;
-            Transform3 result;
-
-            // show point clouds
-            // before registration
-            boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer(new pcl::visualization::PCLVisualizer("registration UI"));
-            viewer->setBackgroundColor(0, 0, 0);
-            viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 6, "registration UI");
-
-            /* initialize random seed for generating colors */
-            srand(time(NULL));
-
-            int cR, cG, cB; // colors
-            // read point clouds
-            for (size_t i = 0; i < noPC; i++)
-            {
-                cR = rand() % 256;
-                cG = rand() % 256;
-                cB = rand() % 256;
-
-                getline(myfile, line);
-                cout << "reading: " << line << " ..." << endl;
-                char cloudName[50];
-                sprintf(cloudName, "Point Cloud %d", (int)i + 1);
-                // read data into source pc, and register it to the target (ignore the first one)
-                if (i % 2 == 0)
-                {
-                    if (pcl::io::load<pcl::PointXYZ>(line, *cloudS) == -1) //* load the file
-                    {
-                        cout << "Couldn't read file: " << line << endl;
-                        return (-1);
-                    }
-
-                    // voxel grid filter
-                    cout << "performing voxel grid sampling with grid size = " << inlTh << endl;
-                    VGF(cloudS, cloudS, inlTh);
-
-                    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> colorSOri(cloudS, cR, cG, cB);
-                    viewer->addPointCloud<pcl::PointXYZ>(cloudS, colorSOri, cloudName);
-                    viewer->spinOnce();
-
-                    cout << "extracting ISS keypoints..." << endl;
-                    ISSExt(cloudS, issS, issIdxS, inlTh);
-                    cout << "computing FPFH..." << endl;
-                    FPFHComp(cloudS, inlTh, issIdxS, fpfhS);
-
-                    if (i == 0)
-                    {
-                        continue;
-                    }
-                    else
-                    {
-
-                        // match features (source to target)
-                        cout << "matching correspodences..." << endl;
-                        corrComp(fpfhS, fpfhT, corr, maxCorr, corrNOS, corrNOT);
-                        cout << "NO. corr = " << corr.size() << endl;
-
-                        // translating the center of both point clouds to the origin
-                        Vector3 centS(0, 0, 0), centT(0, 0, 0);
-                        double rS, rT;
-                        CentAndRComp(issS, centS, rS);
-                        CentAndRComp(issT, centT, rT);
-                        Vector3 mCentS(-centS.x, -centS.y, -centS.z);
-                        Vector3 mCentT(-centT.x, -centT.y, -centT.z);
-                        transPC(issS, mCentS);
-                        transPC(issT, mCentT);
-
-                        // optimization
-                        cout << "running FMP+BnB..." << endl;
-                        globReg4D(issS, issT, corr, corrNOS, corrNOT, inlTh, rS + rT, result);
-
-                        // transform pc
-                        result = TransMatCompute(result, mCentS, mCentT);
-
-                        // after registration
-                        // transform point clouds
-                        Eigen::Matrix4f transform;
-                        for (size_t i = 0; i < 4; i++)
-                        {
-                            for (size_t j = 0; j < 4; j++)
-                            {
-                                transform(i, j) = result.x[i + 4 * j];
-                            }
-                        }
-
-                        pcl::transformPointCloud(*cloudS, *cloudSReg, transform);
-                        transPC(issS, centS);
-                        pcl::transformPointCloud(*issS, *issS, transform);
-
-                        // add transformed pc into the viewer
-                        pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> colorS(cloudSReg, cR, cG, cB);
-                        viewer->removePointCloud(cloudName);
-                        viewer->addPointCloud<pcl::PointXYZ>(cloudSReg, colorS, cloudName);
-                        viewer->spinOnce();
-                    }
-                }
-                // read data into target pc and register it to the source
-                else
-                {
-                    if (pcl::io::load<pcl::PointXYZ>(line, *cloudT) == -1) //* load the file
-                    {
-                        cout << "Couldn't read file: " << line << endl;
-                        return (-1);
-                    }
-
-                    // voxel grid filter
-                    cout << "performing voxel grid sampling with grid size = " << inlTh << endl;
-                    VGF(cloudT, cloudT, inlTh);
-
-                    // add transformed pc into the viewer
-                    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> colorTOri(cloudT, cR, cG, cB);
-                    viewer->addPointCloud<pcl::PointXYZ>(cloudT, colorTOri, cloudName);
-                    viewer->spinOnce();
-
-                    cout << "extracting ISS keypoints..." << endl;
-                    ISSExt(cloudT, issT, issIdxT, inlTh);
-
-                    cout << "computing FPFH..." << endl;
-                    FPFHComp(cloudT, inlTh, issIdxT, fpfhT);
-
-                    // match features (target to source)
-                    cout << "matching correspodences..." << endl;
-                    corrComp(fpfhT, fpfhS, corr, maxCorr, corrNOT, corrNOS);
-                    cout << "NO. corr = " << corr.size() << endl;
-
-                    // translating the center of both point clouds to the origin
-                    Vector3 centS(0, 0, 0), centT(0, 0, 0);
-                    double rS, rT;
-                    CentAndRComp(issS, centS, rS);
-                    CentAndRComp(issT, centT, rT);
-                    Vector3 mCentS(-centS.x, -centS.y, -centS.z);
-                    Vector3 mCentT(-centT.x, -centT.y, -centT.z);
-                    transPC(issS, mCentS);
-                    transPC(issT, mCentT);
-
-                    cout << "running FMP+BnB..." << endl;
-                    globReg4D(issT, issS, corr, corrNOT, corrNOS, inlTh, rS + rT, result);
-                    // transform pc
-                    result = TransMatCompute(result, mCentT, mCentS);
-
-                    // after registration
-                    // transform point clouds
-                    Eigen::Matrix4f transform;
-                    for (size_t i = 0; i < 4; i++)
-                    {
-                        for (size_t j = 0; j < 4; j++)
-                        {
-                            transform(i, j) = result.x[i + 4 * j];
-                        }
-                    }
-
-                    pcl::transformPointCloud(*cloudT, *cloudTReg, transform);
-                    transPC(issT, centT);
-                    pcl::transformPointCloud(*issT, *issT, transform);
-
-                    // add transformed pc into the viewer
-                    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> colorT(cloudTReg, cR, cG, cB);
-                    viewer->removePointCloud(cloudName);
-                    viewer->addPointCloud<pcl::PointXYZ>(cloudTReg, colorT, cloudName);
-                    viewer->spinOnce();
-                }
-            }
-            myfile.close();
-            while (!viewer->wasStopped())
-            {
-                viewer->spinOnce(100);
-                //     boost::this_thread::sleep (boost::posix_time::microseconds (100000));
-            }
-        }
-        else
-        {
-            cout << "Unable to open config file";
-        }
+        pcl::transformPointCloud(*cloudS, *cloudS, result_T);
+        pcl::io::savePCDFileBinary(pcd_save_folder_path + "/" + std::filesystem::path(src_cloud_file).stem().string() + ".pcd", *cloudS);
     }
     return 0;
 }
