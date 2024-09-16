@@ -53,13 +53,13 @@ public:
         return;
 
       std::string line;
+      std::getline(csv_file, line); // skip first line
       while (std::getline(csv_file, line))
       {
         std::istringstream iss(line);
         std::string token;
         std::vector<double> values;
 
-        // Skip first line
         while (std::getline(iss, token, ','))
         {
           values.push_back(std::stod(token));
@@ -135,5 +135,6 @@ public:
     {
       csv_file << "\n";
     }
+    csv_file.flush();
   }
 };
